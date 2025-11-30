@@ -1,8 +1,7 @@
 <?php
-// tamara_create_link.php
-// إنشاء رابط دفع تمارا (In-Store Session)
+// tamara_create_link.php – نسخة بدون cURL تستخدم file_get_contents فقط
 
-// إلغاء عرض الأخطاء على المخرجات (حتى لا يخرب JSON)
+// منع طباعة أخطاء PHP في الاستجابة (حتى يبقى الرد JSON نظيف)
 ini_set('display_errors', 0);
 ini_set('display_startup_errors', 0);
 error_reporting(0);
@@ -16,32 +15,57 @@ require_once 'config.php';
 
 // دالة لتطبيع رقم الجوال لصيغة دولية +9665XXXXXXX
 function normalize_sa_phone($phoneRaw) {
-    // إزالة أي شيء غير أرقام
     $digits = preg_replace('/\D+/', '', $phoneRaw ?? '');
 
     if ($digits === '') {
         return '';
     }
 
-    // يبدأ بـ 966 بالفعل
     if (strpos($digits, '966') === 0) {
         return '+' . $digits;
     }
 
-    // يبدأ بـ 0 وطوله 10 أرقام (مثل 0507190799)
     if (strlen($digits) === 10 && $digits[0] === '0') {
         return '+966' . substr($digits, 1);
     }
 
-    // يبدأ بـ 5 وطوله 9 أرقام (مثل 507190799)
     if (strlen($digits) === 9 && $digits[0] === '5') {
         return '+966' . $digits;
     }
 
-    // أي حالة أخرى نضيف لها +
     return '+' . $digits;
 }
 
+// دالة POST JSON باستخدام file_get_contents
+function http_post_json($url, $jsonBody, $headers = []) {
+    $defaultHeaders = [
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ];
+    $allHeaders = array_merge($defaultHeaders, $headers);
+
+    $context = stream_context_create([
+        'http' => [
+            'method'        => 'POST',
+            'header'        => implode("\r\n", $allHeaders) . "\r\n",
+            'content'       => $jsonBody,
+            'ignore_errors' => true, // مهم حتى نستقبل جسم الرد حتى لو كود الخطأ 4xx/5xx
+            'timeout'       => 30,
+        ],
+    ]);
+
+    $response = @file_get_contents($url, false, $context);
+    $statusLine = $http_response_header[0] ?? 'HTTP/1.1 500 Internal Server Error';
+    if (!preg_match('#\s(\d{3})\s#', $statusLine, $m)) {
+        $statusCode = 500;
+    } else {
+        $statusCode = (int)$m[1];
+    }
+
+    return [$statusCode, $response];
+}
+
+// قراءة بيانات الطلب من الواجهة
 $input = file_get_contents('php://input');
 $data  = json_decode($input, true);
 
@@ -65,6 +89,7 @@ if ($amount <= 0 || $phone === '') {
     exit;
 }
 
+// تجهيز Body تمارا
 $orderReferenceId = 'TAM-' . time();
 $orderNumber      = $orderReferenceId;
 
@@ -92,44 +117,44 @@ $requestBody = [
     ],
 ];
 
-$ch = curl_init();
-curl_setopt_array($ch, [
-    CURLOPT_URL            => TAMARA_API_BASE . '/checkout/in-store-session',
-    CURLOPT_POST           => true,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER     => [
-        'Authorization: Bearer ' . TAMARA_MERCHANT_TOKEN,
-        'Content-Type: application/json',
-        'Accept: application/json',
-    ],
-    CURLOPT_POSTFIELDS     => json_encode($requestBody, JSON_UNESCAPED_UNICODE),
-    CURLOPT_TIMEOUT        => 30,
-]);
+// إرسال الطلب لتمارا
+$jsonBody = json_encode($requestBody, JSON_UNESCAPED_UNICODE);
 
-$response  = curl_exec($ch);
-$httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$curlError = curl_error($ch);
-curl_close($ch);
+list($httpCode, $response) = http_post_json(
+    TAMARA_API_BASE . '/checkout/in-store-session',
+    $jsonBody,
+    ['Authorization: Bearer ' . TAMARA_MERCHANT_TOKEN]
+);
 
-if ($response === false) {
-    http_response_code(500);
-    echo json_encode(['ok' => false, 'error' => 'cURL error: ' . $curlError]);
+if ($response === false || $response === null) {
+    http_response_code(502);
+    echo json_encode([
+        'ok'       => false,
+        'provider' => 'tamara',
+        'error'    => 'Tamara API did not return a response (network or SSL issue)',
+        'http_code'=> $httpCode,
+    ]);
     exit;
 }
 
+// محاولة قراءة رد تمارا كـ JSON
 $decoded = json_decode($response, true);
 
-// تجهيز رسالة خطأ أوضح
-$errorMessage = 'Tamara API error';
-if (is_array($decoded)) {
-    if (isset($decoded['message']) && is_string($decoded['message'])) {
-        $errorMessage .= ': ' . $decoded['message'];
-    } elseif (isset($decoded['errors'][0]['message'])) {
-        $errorMessage .= ': ' . $decoded['errors'][0]['message'];
-    }
+// لو الرد ليس JSON على الإطلاق، رجّعه كنص داخل JSON نظيف
+if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
+    http_response_code($httpCode ?: 500);
+    echo json_encode([
+        'ok'        => false,
+        'provider'  => 'tamara',
+        'error'     => 'Tamara API returned non-JSON response',
+        'http_code' => $httpCode,
+        'raw_text'  => mb_substr($response, 0, 500, 'UTF-8'),
+    ]);
+    exit;
 }
 
-if ($httpCode >= 200 && $httpCode < 300 && is_array($decoded) && isset($decoded['checkout_url'])) {
+// تجهيز رسالة خطأ أو نجاح
+if ($httpCode >= 200 && $httpCode < 300 && isset($decoded['checkout_url'])) {
     echo json_encode([
         'ok'           => true,
         'provider'     => 'tamara',
@@ -140,6 +165,13 @@ if ($httpCode >= 200 && $httpCode < 300 && is_array($decoded) && isset($decoded[
         'phone_sent'   => $phone,
     ]);
     exit;
+}
+
+$errorMessage = 'Tamara API error';
+if (isset($decoded['message'])) {
+    $errorMessage .= ': ' . $decoded['message'];
+} elseif (isset($decoded['errors'][0]['message'])) {
+    $errorMessage .= ': ' . $decoded['errors'][0]['message'];
 }
 
 http_response_code($httpCode ?: 500);
