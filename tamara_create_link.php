@@ -1,0 +1,106 @@
+<?php
+// tamara_create_link.php
+// إنشاء رابط دفع تمارا (In-Store Session)
+
+header('Content-Type: application/json; charset=utf-8');
+header('Access-Control-Allow-Origin: *');
+header('Access-Control-Allow-Methods: POST');
+header('Access-Control-Allow-Headers: Content-Type');
+
+require_once 'config.php';
+
+$input = file_get_contents('php://input');
+$data  = json_decode($input, true);
+
+if (!is_array($data)) {
+    http_response_code(400);
+    echo json_encode(['ok' => false, 'error' => 'Bad JSON payload']);
+    exit;
+}
+
+$amount      = isset($data['amount']) ? floatval($data['amount']) : 0;
+$currency    = !empty($data['currency']) ? $data['currency'] : BNPL_DEFAULT_CURRENCY;
+$phone       = trim($data['phone'] ?? '');
+$email       = trim($data['email'] ?? '');
+$description = trim($data['description'] ?? 'Tamara payment link');
+
+if ($amount <= 0 || $phone === '') {
+    http_response_code(400);
+    echo json_encode(['ok' => false, 'error' => 'الرجاء إدخال مبلغ صحيح ورقم جوال.']);
+    exit;
+}
+
+$orderReferenceId = 'TAM-' . time();
+$orderNumber      = $orderReferenceId;
+
+$requestBody = [
+    'total_amount' => [
+        'amount'   => $amount,
+        'currency' => $currency,
+    ],
+    'phone_number'       => $phone,
+    'email'              => $email !== '' ? $email : null,
+    'order_reference_id' => $orderReferenceId,
+    'order_number'       => $orderNumber,
+    'items'              => [
+        [
+            'name'            => $description,
+            'type'            => 'Digital',
+            'reference_id'    => 'ITEM-1',
+            'sku'             => 'SKU-1',
+            'quantity'        => 1,
+            'discount_amount' => ['amount' => 0, 'currency' => $currency],
+            'unit_price'      => ['amount' => $amount, 'currency' => $currency],
+            'tax_amount'      => ['amount' => 0, 'currency' => $currency],
+            'total_amount'    => ['amount' => $amount, 'currency' => $currency],
+        ],
+    ],
+];
+
+$ch = curl_init();
+curl_setopt_array($ch, [
+    CURLOPT_URL            => TAMARA_API_BASE . '/checkout/in-store-session',
+    CURLOPT_POST           => true,
+    CURLOPT_RETURNTRANSFER => true,
+    CURLOPT_HTTPHEADER     => [
+        'Authorization: Bearer ' . TAMARA_MERCHANT_TOKEN,
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ],
+    CURLOPT_POSTFIELDS     => json_encode($requestBody, JSON_UNESCAPED_UNICODE),
+    CURLOPT_TIMEOUT        => 30,
+]);
+
+$response  = curl_exec($ch);
+$httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+$curlError = curl_error($ch);
+curl_close($ch);
+
+if ($response === false) {
+    http_response_code(500);
+    echo json_encode(['ok' => false, 'error' => 'cURL error: ' . $curlError]);
+    exit;
+}
+
+$decoded = json_decode($response, true);
+
+if ($httpCode >= 200 && $httpCode < 300 && is_array($decoded) && isset($decoded['checkout_url'])) {
+    echo json_encode([
+        'ok'           => true,
+        'provider'     => 'tamara',
+        'checkout_url' => $decoded['checkout_url'],
+        'order_id'     => $decoded['order_id']    ?? null,
+        'checkout_id'  => $decoded['checkout_id'] ?? null,
+        'raw'          => $decoded,
+    ]);
+    exit;
+}
+
+http_response_code($httpCode ?: 500);
+echo json_encode([
+    'ok'        => false,
+    'provider'  => 'tamara',
+    'error'     => 'Tamara API error',
+    'http_code' => $httpCode,
+    'body'      => $decoded,
+]);
