@@ -1,8 +1,6 @@
 <?php
-// emkan_create_link.php
-// هيكل مبدئي لإنشاء طلب BNPL مع إمكان Emkan
+// emkan_create_link.php – مع تجاوز تحقق SSL للتجارب
 
-// إلغاء عرض الأخطاء على المخرجات
 ini_set('display_errors', 0);
 ini_set('display_startup_errors', 0);
 error_reporting(0);
@@ -14,12 +12,44 @@ header('Access-Control-Allow-Headers: Content-Type');
 
 require_once 'config.php';
 
+function http_post_json($url, $jsonBody, $headers = []) {
+    $defaultHeaders = ['Content-Type: application/json', 'Accept: application/json'];
+    $allHeaders = array_merge($defaultHeaders, $headers);
+
+    $contextOptions = [
+        'http' => [
+            'method'        => 'POST',
+            'header'        => implode("\r\n", $allHeaders) . "\r\n",
+            'content'       => $jsonBody,
+            'ignore_errors' => true,
+            'timeout'       => 30,
+        ],
+        // تجاوز التحقق من شهادة SSL (للتجارب فقط – لا تستخدمه في الإنتاج)
+        'ssl'  => [
+            'verify_peer'      => false,
+            'verify_peer_name' => false,
+        ],
+    ];
+
+    $context  = stream_context_create($contextOptions);
+    $response = @file_get_contents($url, false, $context);
+
+    $statusLine = $http_response_header[0] ?? 'HTTP/1.1 500 Internal Server Error';
+    if (!preg_match('#\s(\d{3})\s#', $statusLine, $m)) {
+        $statusCode = 500;
+    } else {
+        $statusCode = (int)$m[1];
+    }
+
+    return [$statusCode, $response];
+}
+
 $input = file_get_contents('php://input');
 $data  = json_decode($input, true);
 
 if (!is_array($data)) {
     http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'Bad JSON payload']);
+    echo json_encode(['ok' => false, 'provider' => 'emkan', 'error' => 'Bad JSON payload']);
     exit;
 }
 
@@ -31,79 +61,93 @@ $description = trim($data['description'] ?? 'Emkan BNPL link');
 
 if ($amount <= 0 || $phone === '') {
     http_response_code(400);
-    echo json_encode(['ok' => false, 'error' => 'الرجاء إدخال مبلغ صحيح ورقم جوال.']);
+    echo json_encode(['ok' => false, 'provider' => 'emkan', 'error' => 'الرجاء إدخال مبلغ صحيح ورقم جوال.']);
     exit;
 }
 
-$orderReferenceId = 'EMK-' . time();
+$orderRef = 'EMK-' . time();
 
-// *** مهم: هذا الـ Body يجب تعديله حسب مستندات Emkan الرسمية ***
+// body مبدئي – نعدله إذا أعطتك إمكان شكل مختلف
 $requestBody = [
-    'amount'      => $amount,
-    'currency'    => $currency,
-    'customer'    => [
-        'phone' => $phone,
-        'email' => $email,
+    'orderRef' => $orderRef,
+    'amount'   => [
+        'value'    => $amount,
+        'currency' => $currency,
+    ],
+    'customer' => [
+        'mobile' => $phone,
+        'email'  => $email !== '' ? $email : null,
     ],
     'description' => $description,
-    'order_ref'   => $orderReferenceId,
 ];
 
-$headers = [
-    'Content-Type: application/json',
-    'Accept: application/json',
-    'x-api-key: ' . EMKAN_API_KEY,
-    'x-api-secret: ' . EMKAN_API_SECRET,
-];
+$jsonBody = json_encode($requestBody, JSON_UNESCAPED_UNICODE);
 
-$endpointUrl = EMKAN_API_BASE . '/api/bnpl/orders';
+// endpoint افتراضي – لو إمكان أعطوك endpoint آخر نبدله
+$endpointUrl = rtrim(EMKAN_API_BASE, '/') . '/api/bnpl/orders';
 
-$ch = curl_init();
-curl_setopt_array($ch, [
-    CURLOPT_URL            => $endpointUrl,
-    CURLOPT_POST           => true,
-    CURLOPT_RETURNTRANSFER => true,
-    CURLOPT_HTTPHEADER     => $headers,
-    CURLOPT_POSTFIELDS     => json_encode($requestBody, JSON_UNESCAPED_UNICODE),
-    CURLOPT_TIMEOUT        => 30,
-]);
+list($httpCode, $response) = http_post_json(
+    $endpointUrl,
+    $jsonBody,
+    [
+        'x-api-key: '    . EMKAN_API_KEY,
+        'x-api-secret: ' . EMKAN_API_SECRET,
+    ]
+);
 
-$response  = curl_exec($ch);
-$httpCode  = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$curlError = curl_error($ch);
-curl_close($ch);
-
-if ($response === false) {
-    http_response_code(500);
+if ($response === false || $response === null) {
+    http_response_code(502);
     echo json_encode([
-        'ok'    => false,
-        'error' => 'cURL error: ' . $curlError,
+        'ok'        => false,
+        'provider'  => 'emkan',
+        'error'     => 'Emkan API did not return a response (network or SSL issue)',
+        'http_code' => $httpCode,
     ]);
     exit;
 }
 
 $decoded = json_decode($response, true);
 
-if ($httpCode >= 200 && $httpCode < 300 && is_array($decoded)) {
-    $link = $decoded['payment_url'] ?? $decoded['checkout_url'] ?? null;
+if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
+    http_response_code($httpCode ?: 500);
+    echo json_encode([
+        'ok'        => false,
+        'provider'  => 'emkan',
+        'error'     => 'Emkan API returned non-JSON response',
+        'http_code' => $httpCode,
+        'raw_text'  => mb_substr($response, 0, 500, 'UTF-8'),
+    ]);
+    exit;
+}
 
-    if ($link) {
-        echo json_encode([
-            'ok'           => true,
-            'provider'     => 'emkan',
-            'checkout_url' => $link,
-            'order_ref'    => $orderReferenceId,
-            'raw'          => $decoded,
-        ]);
-        exit;
-    }
+$link =
+    $decoded['payment_url'] ??
+    $decoded['checkout_url'] ??
+    null;
+
+if ($httpCode >= 200 && $httpCode < 300 && $link) {
+    echo json_encode([
+        'ok'           => true,
+        'provider'     => 'emkan',
+        'checkout_url' => $link,
+        'order_ref'    => $orderRef,
+        'raw'          => $decoded,
+    ]);
+    exit;
+}
+
+$errorMessage = 'Emkan API error';
+if (isset($decoded['message'])) {
+    $errorMessage .= ': ' . $decoded['message'];
+} elseif (isset($decoded['errors'][0]['message'])) {
+    $errorMessage .= ': ' . $decoded['errors'][0]['message'];
 }
 
 http_response_code($httpCode ?: 500);
 echo json_encode([
     'ok'        => false,
     'provider'  => 'emkan',
-    'error'     => 'Emkan API error (تحقق من المسار والـ body مع دعم إمكان)',
+    'error'     => $errorMessage,
     'http_code' => $httpCode,
     'body'      => $decoded,
 ]);
