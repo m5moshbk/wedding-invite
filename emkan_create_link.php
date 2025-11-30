@@ -1,5 +1,5 @@
 <?php
-// emkan_create_link.php – مع تجاوز تحقق SSL للتجارب
+// emkan_create_link.php – نسخة cURL مع توضيح سبب الخطأ الحقيقي
 
 ini_set('display_errors', 0);
 ini_set('display_startup_errors', 0);
@@ -12,44 +12,50 @@ header('Access-Control-Allow-Headers: Content-Type');
 
 require_once 'config.php';
 
-function http_post_json($url, $jsonBody, $headers = []) {
-    $defaultHeaders = ['Content-Type: application/json', 'Accept: application/json'];
+/**
+ * إرسال POST JSON إلى إمكان باستخدام cURL
+ * نعيد: [http_status, body, curl_error, curl_errno]
+ */
+function http_post_json_curl($url, $jsonBody, $headers = [])
+{
+    $defaultHeaders = [
+        'Content-Type: application/json',
+        'Accept: application/json',
+    ];
     $allHeaders = array_merge($defaultHeaders, $headers);
 
-    $contextOptions = [
-        'http' => [
-            'method'        => 'POST',
-            'header'        => implode("\r\n", $allHeaders) . "\r\n",
-            'content'       => $jsonBody,
-            'ignore_errors' => true,
-            'timeout'       => 30,
-        ],
-        // تجاوز التحقق من شهادة SSL (للتجارب فقط – لا تستخدمه في الإنتاج)
-        'ssl'  => [
-            'verify_peer'      => false,
-            'verify_peer_name' => false,
-        ],
-    ];
+    $ch = curl_init($url);
+    curl_setopt_array($ch, [
+        CURLOPT_POST           => true,
+        CURLOPT_RETURNTRANSFER => true,
+        CURLOPT_HTTPHEADER     => $allHeaders,
+        CURLOPT_POSTFIELDS     => $jsonBody,
+        CURLOPT_TIMEOUT        => 30,
+        // تجاوز تحقق SSL لأغراض التجربة فقط
+        CURLOPT_SSL_VERIFYPEER => false,
+        CURLOPT_SSL_VERIFYHOST => 0,
+    ]);
 
-    $context  = stream_context_create($contextOptions);
-    $response = @file_get_contents($url, false, $context);
+    $responseBody = curl_exec($ch);
+    $curlErrNo    = curl_errno($ch);
+    $curlErrMsg   = curl_error($ch);
+    $httpCode     = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
 
-    $statusLine = $http_response_header[0] ?? 'HTTP/1.1 500 Internal Server Error';
-    if (!preg_match('#\s(\d{3})\s#', $statusLine, $m)) {
-        $statusCode = 500;
-    } else {
-        $statusCode = (int)$m[1];
-    }
-
-    return [$statusCode, $response];
+    return [$httpCode, $responseBody, $curlErrMsg, $curlErrNo];
 }
 
+// قراءة البيانات من الـ frontend
 $input = file_get_contents('php://input');
 $data  = json_decode($input, true);
 
 if (!is_array($data)) {
     http_response_code(400);
-    echo json_encode(['ok' => false, 'provider' => 'emkan', 'error' => 'Bad JSON payload']);
+    echo json_encode([
+        'ok'       => false,
+        'provider' => 'emkan',
+        'error'    => 'Bad JSON payload from frontend.',
+    ]);
     exit;
 }
 
@@ -61,20 +67,24 @@ $description = trim($data['description'] ?? 'Emkan BNPL link');
 
 if ($amount <= 0 || $phone === '') {
     http_response_code(400);
-    echo json_encode(['ok' => false, 'provider' => 'emkan', 'error' => 'الرجاء إدخال مبلغ صحيح ورقم جوال.']);
+    echo json_encode([
+        'ok'       => false,
+        'provider' => 'emkan',
+        'error'    => 'الرجاء إدخال مبلغ صحيح ورقم جوال.',
+    ]);
     exit;
 }
 
 $orderRef = 'EMK-' . time();
 
-// body مبدئي – نعدله إذا أعطتك إمكان شكل مختلف
+// جسم الطلب – شكل مبدئي
 $requestBody = [
-    'orderRef' => $orderRef,
-    'amount'   => [
+    'orderRef'    => $orderRef,
+    'amount'      => [
         'value'    => $amount,
         'currency' => $currency,
     ],
-    'customer' => [
+    'customer'    => [
         'mobile' => $phone,
         'email'  => $email !== '' ? $email : null,
     ],
@@ -83,10 +93,10 @@ $requestBody = [
 
 $jsonBody = json_encode($requestBody, JSON_UNESCAPED_UNICODE);
 
-// endpoint افتراضي – لو إمكان أعطوك endpoint آخر نبدله
+// الـ endpoint (قابل للتعديل حسب مستندات إمكان)
 $endpointUrl = rtrim(EMKAN_API_BASE, '/') . '/api/bnpl/orders';
 
-list($httpCode, $response) = http_post_json(
+list($httpCode, $responseBody, $curlErrMsg, $curlErrNo) = http_post_json_curl(
     $endpointUrl,
     $jsonBody,
     [
@@ -95,34 +105,44 @@ list($httpCode, $response) = http_post_json(
     ]
 );
 
-if ($response === false || $response === null) {
+// لو cURL نفسه فشل (DNS, SSL, حظر ...)
+if ($responseBody === false || $responseBody === null) {
     http_response_code(502);
     echo json_encode([
         'ok'        => false,
         'provider'  => 'emkan',
-        'error'     => 'Emkan API did not return a response (network or SSL issue)',
+        'error'     => 'Emkan API did not return a response (network / SSL / firewall).',
         'http_code' => $httpCode,
+        'curl_err'  => [
+            'code' => $curlErrNo,
+            'msg'  => $curlErrMsg,
+        ],
+        'endpoint'  => $endpointUrl,
     ]);
     exit;
 }
 
-$decoded = json_decode($response, true);
+// محاولة فك JSON
+$decoded = json_decode($responseBody, true);
 
 if ($decoded === null && json_last_error() !== JSON_ERROR_NONE) {
     http_response_code($httpCode ?: 500);
     echo json_encode([
         'ok'        => false,
         'provider'  => 'emkan',
-        'error'     => 'Emkan API returned non-JSON response',
+        'error'     => 'Emkan API returned non-JSON response.',
         'http_code' => $httpCode,
-        'raw_text'  => mb_substr($response, 0, 500, 'UTF-8'),
+        'raw_text'  => mb_substr($responseBody, 0, 600, 'UTF-8'),
+        'endpoint'  => $endpointUrl,
     ]);
     exit;
 }
 
+// محاولة استخراج رابط الدفع
 $link =
     $decoded['payment_url'] ??
     $decoded['checkout_url'] ??
+    $decoded['url'] ??
     null;
 
 if ($httpCode >= 200 && $httpCode < 300 && $link) {
@@ -136,6 +156,7 @@ if ($httpCode >= 200 && $httpCode < 300 && $link) {
     exit;
 }
 
+// في حالة خطأ من إمكان
 $errorMessage = 'Emkan API error';
 if (isset($decoded['message'])) {
     $errorMessage .= ': ' . $decoded['message'];
@@ -150,4 +171,5 @@ echo json_encode([
     'error'     => $errorMessage,
     'http_code' => $httpCode,
     'body'      => $decoded,
+    'endpoint'  => $endpointUrl,
 ]);
