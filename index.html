@@ -1,3 +1,143 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8" />
+  <title>إنشاء روابط دفع (تمارا / إمكان)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #020617;
+      color: #e5e7eb;
+      margin: 0;
+      padding: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .wrapper {
+      width: 100%;
+      max-width: 640px;
+      padding: 16px;
+    }
+    .card {
+      background: radial-gradient(circle at top left, #1d4ed8, #4c1d95 40%, #020617 80%);
+      border-radius: 24px;
+      padding: 24px 20px 20px;
+      box-shadow: 0 24px 60px rgba(15,23,42,0.9);
+      border: 1px solid rgba(148,163,184,0.35);
+      backdrop-filter: blur(16px);
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 20px;
+      color: #f9fafb;
+    }
+    .subtitle {
+      font-size: 12px;
+      color: #cbd5f5;
+      margin-bottom: 20px;
+    }
+    label {
+      font-size: 12px;
+      color: #e5e7eb;
+      margin-bottom: 4px;
+      display: block;
+    }
+    input, textarea {
+      width: 100%;
+      box-sizing: border-box;
+      border-radius: 12px;
+      border: 1px solid rgba(15,23,42,0.8);
+      padding: 10px 12px;
+      font-size: 14px;
+      background: rgba(15,23,42,0.85);
+      color: #f9fafb;
+      margin-bottom: 10px;
+    }
+    .hint {
+      font-size: 11px;
+      color: #cbd5f5;
+      margin-top: -6px;
+      margin-bottom: 10px;
+    }
+    .row {
+      display: flex;
+      gap: 8px;
+      margin-top: 4px;
+    }
+    .row button {
+      flex: 1;
+      border-radius: 999px;
+      padding: 10px 12px;
+      border: none;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      color: #0f172a;
+    }
+    #btnTamara {
+      background: linear-gradient(90deg, #a855f7, #6366f1);
+    }
+    #btnEmkan {
+      background: linear-gradient(90deg, #0ea5e9, #22c55e);
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    .result {
+      margin-top: 14px;
+      font-size: 12px;
+      padding: 10px;
+      border-radius: 12px;
+      border: 1px dashed rgba(148,163,184,0.6);
+      background: rgba(15,23,42,0.75);
+      white-space: pre-wrap;
+      word-break: break-all;
+    }
+    .result.error {
+      color: #fecaca;
+      border-color: #fca5a5;
+    }
+    .result.success {
+      color: #bbf7d0;
+      border-color: #86efac;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrapper">
+    <div class="card">
+      <h1>إنشاء روابط دفع (تمارا / إمكان)</h1>
+      <div class="subtitle">
+        هذه نسخة اختبار – إذا رأيتها فالموقع يعمل، وباقي نختبر تمارا وإمكان.
+      </div>
+
+      <label for="amount">المبلغ (ريال سعودي)</label>
+      <input type="number" id="amount" step="0.01" placeholder="مثال: 1000" />
+      <div class="hint">قيمة الفاتورة الكاملة بالريال السعودي.</div>
+
+      <label for="phone">رقم الجوال (بدون +966)</label>
+      <input type="tel" id="phone" placeholder="مثال: 0507190799" />
+      <div class="hint">سيتم تحويل الرقم تلقائيًا إلى صيغة دولية (+966) داخل السكربت.</div>
+
+      <label for="email">البريد الإلكتروني (اختياري)</label>
+      <input type="email" id="email" placeholder="customer@example.com" />
+
+      <label for="description">وصف الدفع (اختياري)</label>
+      <textarea id="description" rows="2" placeholder="مثال: دفعة خدمة استشارة / طلب رقم 123"></textarea>
+
+      <div class="row">
+        <button id="btnEmkan">رابط إمكان (تجريبي)</button>
+        <button id="btnTamara">رابط تمارا</button>
+      </div>
+
+      <div id="output" class="result"></div>
+    </div>
+  </div>
+
   <script>
     const out = document.getElementById('output');
     const btnTamara = document.getElementById('btnTamara');
@@ -33,26 +173,14 @@
         const text = await res.text();
         let data;
 
-        // نحاول أولاً JSON كامل
         try {
           data = JSON.parse(text);
         } catch (parseErr) {
-          // نحاول استخراج أول { وآخر } لو الرد HTML فيه JSON داخله
           const start = text.indexOf('{');
           const end   = text.lastIndexOf('}');
           if (start !== -1 && end !== -1 && end > start) {
             const candidate = text.slice(start, end + 1);
-            try {
-              data = JSON.parse(candidate);
-            } catch (e2) {
-              out.classList.add('error');
-              out.textContent =
-                'الاستجابة من السيرفر ليست JSON متوقعة.\n' +
-                'HTTP: ' + res.status + '\n' +
-                'نص مختصر من الاستجابة:\n' +
-                text.slice(0, 300);
-              return;
-            }
+            data = JSON.parse(candidate);
           } else {
             out.classList.add('error');
             out.textContent =
@@ -91,3 +219,5 @@
     btnTamara.addEventListener('click', () => createLink('tamara'));
     btnEmkan.addEventListener('click',  () => createLink('emkan'));
   </script>
+</body>
+</html>
