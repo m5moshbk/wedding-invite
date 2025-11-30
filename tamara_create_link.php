@@ -2,6 +2,11 @@
 // tamara_create_link.php
 // إنشاء رابط دفع تمارا (In-Store Session)
 
+// إلغاء عرض الأخطاء على المخرجات (حتى لا يخرب JSON)
+ini_set('display_errors', 0);
+ini_set('display_startup_errors', 0);
+error_reporting(0);
+
 header('Content-Type: application/json; charset=utf-8');
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: POST');
@@ -114,6 +119,7 @@ if ($response === false) {
 
 $decoded = json_decode($response, true);
 
+// تجهيز رسالة خطأ أوضح
 $errorMessage = 'Tamara API error';
 if (is_array($decoded)) {
     if (isset($decoded['message']) && is_string($decoded['message'])) {
