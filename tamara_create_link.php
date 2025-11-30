@@ -14,31 +14,29 @@ function normalize_sa_phone($phoneRaw) {
     // إزالة أي شيء غير أرقام
     $digits = preg_replace('/\D+/', '', $phoneRaw ?? '');
 
-    // لا يوجد رقم أصلاً
     if ($digits === '') {
         return '';
     }
 
     // يبدأ بـ 966 بالفعل
     if (strpos($digits, '966') === 0) {
-        return '+'.$digits;
+        return '+' . $digits;
     }
 
-    // يبدأ بـ 0 وطوله 10 أرقام (مثال: 0507190799)
+    // يبدأ بـ 0 وطوله 10 أرقام (مثل 0507190799)
     if (strlen($digits) === 10 && $digits[0] === '0') {
-        return '+966'.substr($digits, 1); // نحذف الصفر ونضيف 966
+        return '+966' . substr($digits, 1);
     }
 
-    // يبدأ بـ 5 وطوله 9 أرقام (مثال: 507190799)
+    // يبدأ بـ 5 وطوله 9 أرقام (مثل 507190799)
     if (strlen($digits) === 9 && $digits[0] === '5') {
-        return '+966'.$digits;
+        return '+966' . $digits;
     }
 
-    // أي حالة أخرى نرجعه مع +
-    return '+'.$digits;
+    // أي حالة أخرى نضيف لها +
+    return '+' . $digits;
 }
 
-// قراءة بيانات الطلب من JSON
 $input = file_get_contents('php://input');
 $data  = json_decode($input, true);
 
@@ -54,7 +52,6 @@ $phoneRaw    = trim($data['phone'] ?? '');
 $email       = trim($data['email'] ?? '');
 $description = trim($data['description'] ?? 'Tamara payment link');
 
-// نطبّع رقم الجوال لصيغة دولية
 $phone = normalize_sa_phone($phoneRaw);
 
 if ($amount <= 0 || $phone === '') {
@@ -117,7 +114,6 @@ if ($response === false) {
 
 $decoded = json_decode($response, true);
 
-// تجهيز رسالة خطأ أوضح لو فيه تفاصيل من تمارا
 $errorMessage = 'Tamara API error';
 if (is_array($decoded)) {
     if (isset($decoded['message']) && is_string($decoded['message'])) {
