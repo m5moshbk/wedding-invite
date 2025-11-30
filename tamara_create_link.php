@@ -9,6 +9,36 @@ header('Access-Control-Allow-Headers: Content-Type');
 
 require_once 'config.php';
 
+// دالة لتطبيع رقم الجوال لصيغة دولية +9665XXXXXXX
+function normalize_sa_phone($phoneRaw) {
+    // إزالة أي شيء غير أرقام
+    $digits = preg_replace('/\D+/', '', $phoneRaw ?? '');
+
+    // لا يوجد رقم أصلاً
+    if ($digits === '') {
+        return '';
+    }
+
+    // يبدأ بـ 966 بالفعل
+    if (strpos($digits, '966') === 0) {
+        return '+'.$digits;
+    }
+
+    // يبدأ بـ 0 وطوله 10 أرقام (مثال: 0507190799)
+    if (strlen($digits) === 10 && $digits[0] === '0') {
+        return '+966'.substr($digits, 1); // نحذف الصفر ونضيف 966
+    }
+
+    // يبدأ بـ 5 وطوله 9 أرقام (مثال: 507190799)
+    if (strlen($digits) === 9 && $digits[0] === '5') {
+        return '+966'.$digits;
+    }
+
+    // أي حالة أخرى نرجعه مع +
+    return '+'.$digits;
+}
+
+// قراءة بيانات الطلب من JSON
 $input = file_get_contents('php://input');
 $data  = json_decode($input, true);
 
@@ -20,9 +50,12 @@ if (!is_array($data)) {
 
 $amount      = isset($data['amount']) ? floatval($data['amount']) : 0;
 $currency    = !empty($data['currency']) ? $data['currency'] : BNPL_DEFAULT_CURRENCY;
-$phone       = trim($data['phone'] ?? '');
+$phoneRaw    = trim($data['phone'] ?? '');
 $email       = trim($data['email'] ?? '');
 $description = trim($data['description'] ?? 'Tamara payment link');
+
+// نطبّع رقم الجوال لصيغة دولية
+$phone = normalize_sa_phone($phoneRaw);
 
 if ($amount <= 0 || $phone === '') {
     http_response_code(400);
@@ -84,6 +117,16 @@ if ($response === false) {
 
 $decoded = json_decode($response, true);
 
+// تجهيز رسالة خطأ أوضح لو فيه تفاصيل من تمارا
+$errorMessage = 'Tamara API error';
+if (is_array($decoded)) {
+    if (isset($decoded['message']) && is_string($decoded['message'])) {
+        $errorMessage .= ': ' . $decoded['message'];
+    } elseif (isset($decoded['errors'][0]['message'])) {
+        $errorMessage .= ': ' . $decoded['errors'][0]['message'];
+    }
+}
+
 if ($httpCode >= 200 && $httpCode < 300 && is_array($decoded) && isset($decoded['checkout_url'])) {
     echo json_encode([
         'ok'           => true,
@@ -92,6 +135,7 @@ if ($httpCode >= 200 && $httpCode < 300 && is_array($decoded) && isset($decoded[
         'order_id'     => $decoded['order_id']    ?? null,
         'checkout_id'  => $decoded['checkout_id'] ?? null,
         'raw'          => $decoded,
+        'phone_sent'   => $phone,
     ]);
     exit;
 }
@@ -100,7 +144,7 @@ http_response_code($httpCode ?: 500);
 echo json_encode([
     'ok'        => false,
     'provider'  => 'tamara',
-    'error'     => 'Tamara API error',
+    'error'     => $errorMessage,
     'http_code' => $httpCode,
     'body'      => $decoded,
 ]);
